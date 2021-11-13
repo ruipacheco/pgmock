@@ -1,2 +1,2 @@
 # pgmock-rs
-A mocking library for Rust that aims to implement all messages returned by the wire protocol.
+A Postgres mocking library in Rust for people who are developing client applications and need to mock the wire protocol instead of the more common use case of sending a query and receiving pre-defined data.
