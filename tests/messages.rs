@@ -1,10 +1,8 @@
 //! Integration tests for the library.
 
-use std::{net::SocketAddr, path::PathBuf};
-
-use pgservermock::{Server, Stopped};
+/*
+use pgservermock::{Configuration, Server};
 
 #[test]
-fn test_empty_configuration() {
-  let server = Server::<Stopped>::new(None, None);
-}
+fn test_server_default_configuration() {}
+*/

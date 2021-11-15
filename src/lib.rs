@@ -1,4 +1,6 @@
-//! Library used to mock the PostgreSQL server. Returns messages as defined here: https://www.postgresql.org/docs/14/protocol-flow.html#id-1.10.5.7.3
+//! An incomplete in-memory implementation of PostgreSQL designed to mock a real PostgreSQL server in tests.
+//! Each server instance will have exactly one thread responding to requests on a TCP socket with the behaviour
+//! of the server being decided by the configuration struct.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -14,67 +16,127 @@
 #![deny(trivial_numeric_casts)]
 #![deny(absolute_paths_not_starting_with_crate)]
 
-use std::io::Write;
-use std::net::TcpStream;
-use std::os::unix::net::UnixStream;
-
-use std::{net::SocketAddr, path::PathBuf};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 mod v3;
 
 type GenericError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Abstraction over the type of socket to be used.
-pub(crate) enum Stream {
-  Tcp(TcpStream),
-  Unix(UnixStream),
+/// How the server expects the user to authenticate itself.
+#[derive(Debug, PartialEq)]
+pub enum AuthenticationType {
+  /// Server requires no password
+  Trust,
+  /// Server requires a plain text password
+  AuthenticationCleartextPassword,
+  /// Server requires an MD5 password
+  AuthenticationMD5Password,
+  /// Server performs a SASL handshake
+  AuthenticationSASL,
 }
 
-impl Stream {
-  /// Create a new stream based on configuration data.
-  pub(crate) fn new(tcp_socket: Option<SocketAddr>, bsd_socket: Option<PathBuf>) -> Result<Stream, GenericError> {
-    let mut stream: Stream;
-    if bsd_socket.is_some() {
-      stream = Stream::Unix(UnixStream::connect(bsd_socket.unwrap())?);
-    } else {
-      stream = Stream::Tcp(TcpStream::connect(tcp_socket.unwrap())?);
+/// Holds configuration that defines the behaviour of the server.
+#[derive(Debug)]
+pub struct Configuration {
+  user: String,
+  password: Option<String>,
+  dbname: Option<String>,
+  hostaddr: SocketAddr,
+  authentication_type: AuthenticationType,
+}
+
+impl Configuration {
+  /// Creates a configuration object with user supplied values.
+  pub fn new(user: String, password: Option<String>, dbname: Option<String>, hostaddr: SocketAddr, authentication_type: AuthenticationType) -> Self {
+    Configuration {
+      user,
+      password,
+      dbname,
+      hostaddr,
+      authentication_type,
     }
-    Ok(stream)
   }
 
-  pub(crate) fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-    match self {
-      Stream::Tcp(value) => Ok(value.write_all(buf)?),
-      Stream::Unix(value) => Ok(value.write_all(buf)?),
+  /// Returns database username.
+  pub fn user(self) -> String {
+    self.user
+  }
+
+  /// Returns database password.
+  pub fn password(self) -> Option<String> {
+    Some(self.password.unwrap_or_default())
+  }
+
+  /// Database the client will connect to.
+  pub fn dbname(self) -> Option<String> {
+    Some(self.dbname.unwrap_or_default())
+  }
+
+  /// Socket the database will listen in.
+  pub fn hostaddr(self) -> SocketAddr {
+    self.hostaddr
+  }
+
+  /// The type of authentication the database will perform.
+  pub fn authentication_type(self) -> AuthenticationType {
+    self.authentication_type
+  }
+}
+
+impl Default for Configuration {
+  /// Creates a configuration object with default settings.
+  fn default() -> Self {
+    Configuration {
+      user: "postgres".to_owned(),
+      password: None,
+      dbname: None,
+      hostaddr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5432),
+      authentication_type: AuthenticationType::Trust,
     }
   }
 }
 
-/// Represents a PostgreSQL server.
-pub struct Server<S: Messages> {
-  marker: std::marker::PhantomData<S>,
-  /// Buffer used to store messages to be sent to the client.
-  buffer: Vec<u8>,
-  stream: Stream,
+/// Represents the postmaster in a PostgreSQL server.
+/// It spawns a number of threads, each representing a backend process in the traditional PostgreSQL architecture.
+#[derive(Debug)]
+pub struct Server {
+  configuration: Configuration,
 }
 
-/// Trait used to anchor message types.
-pub trait Messages {}
+impl Server {
+  /// Creates a new server instance with user defined settings.
+  pub fn new(configuration: Configuration) -> Self {
+    Server { configuration }
+  }
 
-/// Stopped server
-pub enum Stopped {}
-impl Messages for Stopped {}
-impl Server<Stopped> {
-  /// Create a new server instance.
-  /// * `configuration` - Configuration data.
-  pub fn new(tcp_socket: Option<SocketAddr>, bsd_socket: Option<PathBuf>) -> Result<Self, GenericError> {
-    let stream = Stream::new(tcp_socket, bsd_socket)?;
-    Ok(Server {
-      marker: Default::default(),
-      buffer: Default::default(),
-      stream,
-    })
+  /// Returns the configuration used to create the server.
+  pub fn configuration(self) -> Configuration {
+    self.configuration
   }
 }
 
-/// Methods available to all messages
-impl<S> Server<S> where S: Messages {}
+impl Default for Server {
+  /// Creates a server instance with default settings.
+  fn default() -> Self {
+    Server {
+      configuration: Configuration::default(),
+    }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+
+  use super::*;
+
+  #[test]
+  fn test_default_configuration() {
+    let configuration = Configuration::default();
+    assert_eq!(configuration.authentication_type, AuthenticationType::Trust)
+  }
+
+  #[test]
+  fn test_default_server() {
+    let server = Server::default();
+    assert_eq!(server.configuration().authentication_type(), AuthenticationType::Trust)
+  }
+}

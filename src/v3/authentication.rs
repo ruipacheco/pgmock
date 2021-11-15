@@ -1,3 +1,4 @@
+/*
 //! Messages sent during the authentication handshake.
 
 use super::super::{Messages, Server};
@@ -12,7 +13,7 @@ impl Server<Authentication> {
 
   /// Add an AuthenticationOk message to the buffer.
   pub fn authentication_ok(&mut self) {
-    self.buffer.append(&mut vec![b'R']);
+    todo!()
   }
 }
 
@@ -24,3 +25,4 @@ mod tests {
   #[test]
   fn test_authentication_ok() {}
 }
+*/

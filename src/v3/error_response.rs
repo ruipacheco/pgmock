@@ -1,3 +1,4 @@
+/*
 //! Implements methods related to the ErrorResponse message.
 
 use super::super::{Messages, Server};
@@ -7,7 +8,7 @@ impl Messages for ErrorResponse {}
 impl Server<ErrorResponse> {
   /// Add an ErrorResponse message to the buffer.
   pub fn error_response(&mut self) {
-    self.buffer.append(&mut vec![b'E']);
+    todo!()
   }
 }
 
@@ -19,3 +20,4 @@ mod tests {
   #[test]
   fn test_wrong_username_error() {}
 }
+*/
