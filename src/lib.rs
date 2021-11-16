@@ -2,7 +2,7 @@
 //! Each server instance will have exactly one thread responding to requests on a TCP socket with the behaviour
 //! of the server being decided by the configuration struct.
 
-#![forbid(unsafe_code)]
+#![warn(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(non_ascii_idents)]
 #![deny(unreachable_pub)]
@@ -16,13 +16,21 @@
 #![deny(trivial_numeric_casts)]
 #![deny(absolute_paths_not_starting_with_crate)]
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+mod errors;
+mod stream;
 mod v3;
 
-type GenericError = Box<dyn std::error::Error + Send + Sync>;
+use std::error::Error;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::process;
+use tokio::net::TcpListener;
+use v3::Backend;
 
-/// How the server expects the user to authenticate itself.
-#[derive(Debug, PartialEq)]
+/// Error returned by the library.
+pub type GenericError = Box<dyn Error + Send + Sync + 'static>;
+
+/// Authentication schemes supported by PostgreSQL.
+#[derive(Debug, PartialEq, Clone)]
 pub enum AuthenticationType {
   /// Server requires no password
   Trust,
@@ -34,8 +42,8 @@ pub enum AuthenticationType {
   AuthenticationSASL,
 }
 
-/// Holds configuration that defines the behaviour of the server.
-#[derive(Debug)]
+/// Configuration data used to define the behaviour of the server.
+#[derive(Debug, Clone)]
 pub struct Configuration {
   user: String,
   password: Option<String>,
@@ -46,6 +54,11 @@ pub struct Configuration {
 
 impl Configuration {
   /// Creates a configuration object with user supplied values.
+  /// * `user` - Database username.
+  /// * `password` - Database password.
+  /// * `dbname` - Database the client will connect to.
+  /// * `hostadd` - Socket the backend will listen in.
+  /// * `authentication_type` - The type of authentication the backend will perform.
   pub fn new(user: String, password: Option<String>, dbname: Option<String>, hostaddr: SocketAddr, authentication_type: AuthenticationType) -> Self {
     Configuration {
       user,
@@ -56,27 +69,27 @@ impl Configuration {
     }
   }
 
-  /// Returns database username.
+  /// Database username.
   pub fn user(self) -> String {
     self.user
   }
 
-  /// Returns database password.
+  /// Database password.
   pub fn password(self) -> Option<String> {
-    Some(self.password.unwrap_or_default())
+    self.password
   }
 
   /// Database the client will connect to.
   pub fn dbname(self) -> Option<String> {
-    Some(self.dbname.unwrap_or_default())
+    self.dbname
   }
 
-  /// Socket the database will listen in.
+  /// Socket the backend will listen in.
   pub fn hostaddr(self) -> SocketAddr {
     self.hostaddr
   }
 
-  /// The type of authentication the database will perform.
+  /// The type of authentication the backend will perform.
   pub fn authentication_type(self) -> AuthenticationType {
     self.authentication_type
   }
@@ -95,30 +108,70 @@ impl Default for Configuration {
   }
 }
 
-/// Represents the postmaster in a PostgreSQL server.
-/// It spawns a number of threads, each representing a backend process in the traditional PostgreSQL architecture.
+/// Represents the Postmaster in the PostgreSQL architecture.
+/// It spawns a number of threads, each representing a backend process that in turn handles user commands.
 #[derive(Debug)]
-pub struct Server {
+pub struct Postmaster<'a> {
   configuration: Configuration,
+  backends: Vec<Backend<'a>>,
+  pid: u32,
 }
 
-impl Server {
+impl<'a> Postmaster<'a> {
   /// Creates a new server instance with user defined settings.
   pub fn new(configuration: Configuration) -> Self {
-    Server { configuration }
+    Postmaster {
+      configuration,
+      backends: Vec::new(),
+      pid: process::id(),
+    }
+  }
+
+  /// Starts a loop listening for messages from the client.
+  /// While PostgreSQL starts a new process once a client connects, we start a new thread and store it in a vector.
+  /// Reference: https://www.postgresql.org/docs/14/connect-estab.html
+  #[tokio::main]
+  pub async fn start(self) -> Result<(), GenericError> {
+    // https://stackoverflow.com/a/55874334/70600
+    let mut this = self;
+    loop {
+      let listener = TcpListener::bind(this.configuration.clone().hostaddr()).await?;
+      match listener.accept().await {
+        Ok((stream, _addr)) => {
+          let id = this.pid + 1;
+          let backend = Backend::new(&this.configuration, stream, id)?;
+          this.backends.push(backend);
+        }
+        // TODO Return or log and continue?
+        Err(e) => todo!("Log error accepting client connection."),
+      }
+    }
+    unreachable!()
   }
 
   /// Returns the configuration used to create the server.
   pub fn configuration(self) -> Configuration {
     self.configuration
   }
+
+  /// Returns the number of back ends available.
+  pub fn number_backends(self) -> usize {
+    self.backends.len()
+  }
+
+  /// Returns the process id of the Postmaster.
+  pub fn pid(self) -> u32 {
+    self.pid
+  }
 }
 
-impl Default for Server {
+impl<'a> Default for Postmaster<'a> {
   /// Creates a server instance with default settings.
   fn default() -> Self {
-    Server {
+    Postmaster {
       configuration: Configuration::default(),
+      backends: Vec::new(),
+      pid: std::process::id(),
     }
   }
 }
@@ -126,7 +179,7 @@ impl Default for Server {
 #[cfg(test)]
 mod tests {
 
-  use super::*;
+  use super::{AuthenticationType, Configuration, Postmaster};
 
   #[test]
   fn test_default_configuration() {
@@ -136,7 +189,7 @@ mod tests {
 
   #[test]
   fn test_default_server() {
-    let server = Server::default();
-    assert_eq!(server.configuration().authentication_type(), AuthenticationType::Trust)
+    let server = Postmaster::default();
+    assert_eq!(server.pid(), std::process::id());
   }
 }
