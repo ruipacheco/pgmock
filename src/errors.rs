@@ -6,6 +6,8 @@ use std::fmt::Display;
 #[derive(Debug)]
 pub(crate) enum Errors {
   ProtocolViolation { message: String },
+  InvalidAuthorizationSpecification { message: String },
+  InvalidPassword { user: String }
 }
 
 impl Display for Errors {
@@ -13,6 +15,12 @@ impl Display for Errors {
     match self {
       Errors::ProtocolViolation { message } => {
         write!(f, "{}", message)
+      }
+      Errors::InvalidAuthorizationSpecification { message } => {
+        write!(f, "{}", message)
+      }
+      Errors::InvalidPassword { user } => {
+        write!(f, "password authentication failed for user {}", user)
       }
     }
   }

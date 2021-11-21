@@ -6,6 +6,10 @@ use crate::errors::Errors;
 use crate::stream::{slice_to_array, Stream};
 use std::collections::HashMap;
 
+static NAME_DATA_LEN: i32 = 64;
+static MAXIMUM_STARTUP_PACKET_LENGTH: usize = 10000;
+static SUPPORTED_PROTOCOL_VERSION: i32 = 196608;
+
 impl Stream {
   /// PostgreSQL packets follow the TLV format except for the first packet which does not have a type.
   ///
@@ -19,30 +23,40 @@ impl Stream {
 /// Represents packets received from the client.
 #[derive(Debug, PartialEq)]
 pub(crate) enum FrontEndFrames {
-  /// First message sent by the client when connection is opened.
+  /// First message sent by the client when connection is opened. The only mandatory parameter is 'user' and an unknown number of parameters may be 
+  /// sent so we store everything in a HashMap.
   StartupMessage { parameters: HashMap<String, String> },
 }
 
 impl TryFrom<&Vec<u8>> for FrontEndFrames {
   type Error = Errors;
   fn try_from(packet: &Vec<u8>) -> Result<Self, Self::Error> {
+    if packet.len() > MAXIMUM_STARTUP_PACKET_LENGTH {
+      return Err(Errors::ProtocolViolation {
+        message: "invalid length of startup packet".to_owned(),
+      });
+    }
+    
     let len: Vec<u8> = packet.clone().into_iter().take(4).collect();
     let length = i32::from_be_bytes(slice_to_array(&len[..4])) as usize;
     if length != packet.len() {
-      return Err(Errors::ProtocolViolation{ message: "Declared packet length does not match actual packet length".to_owned() });
+      return Err(Errors::ProtocolViolation {
+        message: "incomplete startup packet".to_owned(),
+      });
     }
 
     if packet.last().unwrap() != &0 {
-      return Err(Errors::ProtocolViolation{ message: "invalid startup packet layout: expected terminator as last byte".to_owned() })
-    }
-    if length > 10000 {
-      return Err(Errors::ProtocolViolation{ message: "Packet exceeds maximum length.".to_owned() });
+      return Err(Errors::ProtocolViolation {
+        message: "invalid startup packet layout: expected terminator as last byte".to_owned(),
+      });
     }
     let mut parameters = HashMap::new();
     let protocol_version_barray: Vec<u8> = packet.clone().into_iter().skip(4).take(4).collect();
     let protocol_version = i32::from_be_bytes(slice_to_array(&protocol_version_barray[..4]));
-    if protocol_version != 196608 {
-      return Err(Errors::ProtocolViolation{ message: "Unsupported protocol version".to_owned() });
+    if protocol_version != SUPPORTED_PROTOCOL_VERSION {
+      return Err(Errors::ProtocolViolation {
+        message: "unsupported frontend protocol".to_owned(),
+      });
     }
     let inserted = parameters.insert("protocol_version".to_owned(), protocol_version.to_string());
 
@@ -76,6 +90,15 @@ impl TryFrom<&Vec<u8>> for FrontEndFrames {
         value = Some(String::from_utf8(tmp).unwrap());
       }
       let inserted = parameters.insert(name.unwrap(), value.unwrap());
+    }
+    if let None = parameters.keys().into_iter().find(|&x| x == &"user".to_owned()) {
+      return Err(Errors::InvalidAuthorizationSpecification {
+        message: "no PostgreSQL user name specified in startup packet".to_owned(),
+      });
+    }
+    if let None = parameters.keys().into_iter().find(|&x| x == &"database".to_owned()) {
+      let user = parameters[&"user".to_owned()].clone();
+      let inserted = parameters.insert("database".to_owned(), user.clone());
     }
     Ok(FrontEndFrames::StartupMessage { parameters })
   }
@@ -113,15 +136,31 @@ mod tests {
       }
     }
 
+    // TODO Truncate username and database to postgres length
+
+    // TODO If database is missing the username becomes the database name
+
+    /*
+    // TODO Missing 'user' data - incomplete, define length as 70 bytes
+    let packet = vec![
+      0x00, 0x00, 0x00, 0x56, 0x00, 0x03, 0x00, 0x00, 
+      0x64, 0x61, 0x74, 0x61, 0x62, 0x61, 0x73, 0x65, 0x00, 0x70, 0x6f, 0x73, 0x74, 0x67, 0x72, 0x65, 0x73, 0x00, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x63,
+      0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x00, 0x70, 0x73, 0x71, 0x6c, 0x00, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x5f, 0x65,
+      0x6e, 0x63, 0x6f, 0x64, 0x69, 0x6e, 0x67, 0x00, 0x55, 0x54, 0x46, 0x38, 0x00, 0x00,
+    ];
+    let result = FrontEndFrames::try_from(&packet);
+    assert!(matches!(result, Err(Errors::InvalidAuthorizationSpecification { message })));
+    */
+
     // Packet without null terminator as last byte.
     let packet = vec![
       0x00, 0x00, 0x00, 0x56, 0x00, 0x03, 0x00, 0x00, 0x75, 0x73, 0x65, 0x72, 0x00, 0x72, 0x75, 0x69, 0x70, 0x61, 0x63, 0x68, 0x65, 0x63, 0x6f, 0x00,
       0x64, 0x61, 0x74, 0x61, 0x62, 0x61, 0x73, 0x65, 0x00, 0x70, 0x6f, 0x73, 0x74, 0x67, 0x72, 0x65, 0x73, 0x00, 0x61, 0x70, 0x70, 0x6c, 0x69, 0x63,
       0x61, 0x74, 0x69, 0x6f, 0x6e, 0x5f, 0x6e, 0x61, 0x6d, 0x65, 0x00, 0x70, 0x73, 0x71, 0x6c, 0x00, 0x63, 0x6c, 0x69, 0x65, 0x6e, 0x74, 0x5f, 0x65,
-      0x6e, 0x63, 0x6f, 0x64, 0x69, 0x6e, 0x67, 0x00, 0x55, 0x54, 0x46, 0x38, 0x00, 0x00, 0x71
+      0x6e, 0x63, 0x6f, 0x64, 0x69, 0x6e, 0x67, 0x00, 0x55, 0x54, 0x46, 0x38, 0x00, 0x00, 0x71,
     ];
     let result = FrontEndFrames::try_from(&packet);
-    assert!(matches!(result, Err(Errors::ProtocolViolation{ message })));
+    assert!(matches!(result, Err(Errors::ProtocolViolation { message })));
 
     // Packet with declared length different from real length.
     let packet = vec![
@@ -131,7 +170,7 @@ mod tests {
       0x6e, 0x63, 0x6f, 0x64, 0x69, 0x6e, 0x67, 0x00, 0x55, 0x54, 0x46, 0x38, 0x00, 0x00,
     ];
     let result = FrontEndFrames::try_from(&packet);
-    assert!(matches!(result, Err(Errors::ProtocolViolation{ message })));
+    assert!(matches!(result, Err(Errors::ProtocolViolation { message })));
 
     // Packet with more than 10000 bytes.
     let mut packet: Vec<u8> = Vec::new();
@@ -142,7 +181,7 @@ mod tests {
       packet.push(0x00);
     }
     let result = FrontEndFrames::try_from(&packet);
-    assert!(matches!(result, Err(Errors::ProtocolViolation{ message })));
+    assert!(matches!(result, Err(Errors::ProtocolViolation { message })));
 
     // Unsupported protocol.
     let packet = vec![
@@ -152,7 +191,7 @@ mod tests {
       0x6e, 0x63, 0x6f, 0x64, 0x69, 0x6e, 0x67, 0x00, 0x55, 0x54, 0x46, 0x38, 0x00, 0x00,
     ];
     let result = FrontEndFrames::try_from(&packet);
-    assert!(matches!(result, Err(Errors::ProtocolViolation{ message })));
+    assert!(matches!(result, Err(Errors::ProtocolViolation { message })));
   }
 
   #[test]
